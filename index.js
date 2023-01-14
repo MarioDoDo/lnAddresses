@@ -1,8 +1,9 @@
 const express = require('express');
 const {Deta} = require('deta');
 const cors = require('cors')
-const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const {isLnurl, decodeLnurl} = require('./lnurl.js');
+const nocache = require('nocache');
 const path = require("path");
 require('dotenv').config();
 
@@ -12,6 +13,7 @@ const db = deta.Base('lnAddresses');
 const app = express();
 
 app.use(express.json());
+app.use(nocache());
 app.use(cors());
 app.use(express.static(path.join(__dirname, './dist')));
 
@@ -25,16 +27,20 @@ app.post('/new', async (req, res) => {
         res.status(400).json({"message": "Alias is too long. Max length is 20 characters."});
         return;
     }
-    if (lnurl.length > 400) {
-        res.status(400).json({"message": "LNURL is too long. Max length is 400 characters."});
+    if (lnurl.length > 800) {
+        res.status(400).json({"message": "LNURL is too long. Max length is 800 characters."});
         return;
     }
     if (secret.length > 128) {
         res.status(400).json({"message": "Password is too long. Max length is 128 characters."});
         return;
     }
+    if (!alias.match(/^\w+/)) {
+        res.status(400).json({"message": "Alias can only contain letters, numbers, and underscores."});
+        return;
+    }
 
-    const hash = crypto.createHash('sha256').update(secret).digest('hex');
+    const hash = bcrypt.hashSync(secret, bcrypt.genSaltSync(10));
 
     if (!isLnurl(lnurl)) {
         res.status(400).json({"message": "Not valid LNURLp"});
@@ -72,10 +78,9 @@ app.get('/.well-known/lnurlp/:alias', async (req, res) => {
 
 app.put('/update/:alias/:secret', async (req, res) => {
     const {alias, secret} = req.params;
-    const hash = crypto.createHash('sha256').update(secret).digest('hex');
     const user = (await db.fetch({"alias": alias})).items[0];
 
-    if (user && user.hash === hash) {
+    if (user && bcrypt.compareSync(secret, user.hash)) {
         let {newAlias, newLnurl, newSecret} = req.body;
         newLnurl = newLnurl ? newLnurl : user.lnurl;
         if (!newAlias || !newLnurl || !newSecret) {
@@ -94,7 +99,12 @@ app.put('/update/:alias/:secret', async (req, res) => {
             res.status(400).json({"message": "New Password is too long. Max length is 128 characters."});
             return;
         }
-        const newHash = crypto.createHash('sha256').update(newSecret).digest('hex');
+        if (!newAlias.match(/^\w+/)) {
+            res.status(400).json({"message": "Alias can only contain letters, numbers, and underscores."});
+            return;
+        }
+
+        const newHash = bcrypt.hashSync(newSecret, bcrypt.genSaltSync(10));
         const toPut = {"alias": newAlias ?? alias, "lnurl": newLnurl ?? user.lnurl, "hash": newHash ?? user.hash};
         await db.put(toPut);
         await db.delete(user.key);
@@ -110,13 +120,14 @@ app.delete('/delete/:alias/:secret', async (req, res) => {
         res.status(400).json({"message": "Missing alias or password"});
         return;
     }
-    const hash = crypto.createHash('sha256').update(secret).digest('hex');
+
     const user = (await db.fetch({"alias": alias})).items[0];
     if (!user) {
-        res.status(404).json({"message": "user not found"});
+        res.status(404).json({"message": "User not found"});
         return;
     }
-    if (user && user.hash === hash) {
+
+    if (user && bcrypt.compareSync(secret, user.hash)) {
         await db.delete(user.key);
         res.status(200).json({"message": "deleted"})
     } else {
@@ -125,12 +136,27 @@ app.delete('/delete/:alias/:secret', async (req, res) => {
 });
 
 //dev
-/*
+
+app.get("/backup", async (req, res) => {
+    let resa = await db.fetch();
+    let allItems = resa.items;
+
+    while (resa.last){
+        resa = await db.fetch({}, {last: resa.last});
+        allItems = allItems.concat(resa.items);
+    }
+    console.log(allItems, allItems.length);
+    res.status(200).send(`OK ${allItems.length} items saved`);
+});
+
 app.listen(3002, () => {
     console.log('Server listening on port 3002');
-});*/
+});
+
+
+
 
 //deploy
-
+/*
 module.exports = app;
-
+*/
